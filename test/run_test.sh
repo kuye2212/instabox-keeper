@@ -21,56 +21,61 @@ for _ in $(seq 1 60); do
   sleep 0.2
 done
 
-reset() { # state startedAgoMin cooldown
-  curl -s -X POST "$API/__set?state=$1&startedAgoMin=$2&cooldown=$3" >/dev/null
+reset() { # state startedAgoMin cooldown [maxRun]
+  curl -s -X POST "$API/__set?state=$1&startedAgoMin=$2&cooldown=$3&clearEvents=1${4:+&maxRunMinutes=$4}" >/dev/null
 }
 events() { curl -s "$API/__events"; }
-n_events() { events | "$PY_BIN" -c 'import json,sys;print(len(json.load(sys.stdin)))'; }
+n_events() { events | "$PY_BIN" -c 'import json,sys;print(len([e for e in json.load(sys.stdin) if e["action"]!="lease"]))'; }
+n_leases() { events | "$PY_BIN" -c 'import json,sys;print(len([e for e in json.load(sys.stdin) if e["action"]=="lease"]))'; }
+last_action() { events | "$PY_BIN" -c 'import json,sys;e=[x for x in json.load(sys.stdin) if x["action"]!="lease"];print(e[-1]["action"] if e else "")'; }
+first_action() { events | "$PY_BIN" -c 'import json,sys;e=[x for x in json.load(sys.stdin) if x["action"]!="lease"];print(e[0]["action"] if e else "")'; }
 
-run_keeper() { # run_min rest_min
-  INSTABOX_API_KEY=x MACHINE_ID=m_test API_BASE="$API" \
-  RUN_MINUTES="$1" REST_MINUTES="$2" STATE_FILE="$ROOT/test/state.json" \
-  PY_BIN="$PY_BIN" bash "$ROOT/keeper.sh"
+run_keeper() { # [env overrides...] —— 默认不带 RUN_MINUTES
+  env INSTABOX_API_KEY=x MACHINE_ID=m_test API_BASE="$API" \
+      STATE_FILE="$ROOT/test/state.json" PY_BIN="$PY_BIN" "$@" \
+      bash "$ROOT/keeper.sh"
 }
 
-echo "== 场景 1：跑满 471 分钟 → 应 stop → 等 → start =="
-curl -s -X POST "$API/__set?state=running&startedAgoMin=471&cooldown=" >/dev/null
+echo "== 场景 1：跑满上限（120-25=95）→ 应 suspend → resume =="
+reset running 96 "" 120
 rm -f "$ROOT/test/state.json"
-out1="$(run_keeper 470 0.05)"; echo "$out1" | sed 's/^/      /'
-ev="$(events)"
-n="$(n_events)"
-[ "$n" = "2" ] && ok "产生 2 个动作（stop+start）" || bad "动作数应为 2，实际 $n"
-first="$(echo "$ev" | "$PY_BIN" -c 'import json,sys;e=json.load(sys.stdin);print(e[0]["action"])')"
-second="$(echo "$ev" | "$PY_BIN" -c 'import json,sys;e=json.load(sys.stdin);print(e[1]["action"])')"
-[ "$first" = "stop" ] && ok "第一个动作是 stop" || bad "第一个动作是 $first"
-[ "$second" = "start" ] && ok "第二个动作是 start" || bad "第二个动作是 $second"
-echo "$out1" | grep -q "已重新启动" && ok "日志确认重启成功" || bad "日志没有重启成功"
+out1="$(run_keeper env)"; echo "$out1" | sed 's/^/      /'
+[ "$(n_events)" = "2" ] && ok "产生 2 个动作" || bad "动作数应为 2，实际 $(n_events)"
+[ "$(first_action)" = "suspend" ] && ok "第一个动作是 suspend（不杀进程）" || bad "第一个动作是 $(first_action)"
+[ "$(last_action)" = "resume" ] && ok "最后一个动作是 resume" || bad "最后动作是 $(last_action)"
+echo "$out1" | grep -q "已重新启动" && ok "日志确认恢复成功" || bad "日志没有恢复成功"
+[ "$(n_leases)" -ge 1 ] && ok "续租了 activity lease" || bad "没有续租"
 
-echo "== 场景 2：只跑了 10 分钟 → 不应动它 =="
-curl -s -X POST "$API/__set?state=running&startedAgoMin=10&cooldown=" >/dev/null
-before="$(n_events)"
-out2="$(run_keeper 470 0.05)"; echo "$out2" | sed 's/^/      /'
-after="$(n_events)"
-[ "$before" = "$after" ] && ok "没有触发任何动作" || bad "不该动却被动了"
-echo "$out2" | grep -q "还没到 470 分钟" && ok "日志说明未到点" || bad "日志未说明"
+echo "== 场景 2：只跑了 10 分钟 → 不应动它，但要续租 =="
+reset running 10 "" 120
+out2="$(run_keeper env)"; echo "$out2" | sed 's/^/      /'
+[ "$(n_events)" = "0" ] && ok "没有触发轮转动作" || bad "不该动却被动了"
+[ "$(n_leases)" -ge 1 ] && ok "仍然续租（保活生效）" || bad "没续租"
+echo "$out2" | grep -q "还没到" && ok "日志说明未到点" || bad "日志未说明"
 
-echo "== 场景 3：机器被平台停掉且冷却已过 → 应直接拉起 =="
-curl -s -X POST "$API/__set?state=suspended&startedAgoMin=0&cooldown=" >/dev/null
-before="$(n_events)"
-out3="$(run_keeper 470 0.05)"; echo "$out3" | sed 's/^/      /'
-after="$(n_events)"
-[ $((after-before)) -eq 1 ] && ok "只下发一次 start" || bad "动作数异常"
-out3g="$(events | "$PY_BIN" -c 'import json,sys;e=json.load(sys.stdin);print(e[-1]["action"])')"
-[ "$out3g" = "start" ] && ok "最后一个动作是 start" || bad "最后动作是 $out3g"
+echo "== 场景 3：机器被平台挂起且冷却已过 → 应直接拉起 =="
+reset suspended 0 "" 120
+out3="$(run_keeper env)"; echo "$out3" | sed 's/^/      /'
+[ "$(n_events)" = "1" ] && ok "只下发一次动作" || bad "动作数异常：$(n_events)"
+[ "$(last_action)" = "start" ] && ok "动作是 start" || bad "动作是 $(last_action)"
 
 echo "== 场景 4：冷却中 → 什么都不做 =="
 future="$("$PY_BIN" -c 'import time;print(time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(time.time()+3600)))')"
-curl -s -X POST "$API/__set?state=suspended&startedAgoMin=0&cooldown=$future" >/dev/null
-before="$(n_events)"
-out4="$(run_keeper 470 0.05)"; echo "$out4" | sed 's/^/      /'
-after="$(n_events)"
-[ "$before" = "$after" ] && ok "冷却期内没有动作" || bad "冷却期内仍然动了"
+reset suspended 0 "$future" 120
+out4="$(run_keeper env)"; echo "$out4" | sed 's/^/      /'
+[ "$(n_events)" = "0" ] && ok "冷却期内没有动作" || bad "冷却期内仍然动了"
 echo "$out4" | grep -q "冷却中" && ok "日志说明在冷却" || bad "日志未说明冷却"
+
+echo "== 场景 5：RUN_MINUTES=470 超过平台安全点 → 必须被忽略 =="
+reset running 96 "" 120
+out5="$(run_keeper RUN_MINUTES=470)"; echo "$out5" | sed 's/^/      /'
+echo "$out5" | grep -q "超过平台安全点" && ok "给出了告警" || bad "没有告警"
+([ "$(first_action)" = "suspend" ]) && ok "仍然按 95 分钟轮转（没有跑到 470）" || bad "被 470 带跑了"
+
+echo "== 场景 6：RUN_MINUTES 比安全点更早 → 采用更早的 =="
+reset running 60 "" 120
+out6="$(run_keeper RUN_MINUTES=50)"; echo "$out6" | sed 's/^/      /'
+[ "$(first_action)" = "suspend" ] && ok "50 分钟就轮转" || bad "没有按 50 分钟轮转"
 
 echo
 echo "结果：PASS=$PASS FAIL=$FAIL"
