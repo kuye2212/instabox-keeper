@@ -36,7 +36,7 @@ run_keeper() { # [env overrides...] —— 默认不带 RUN_MINUTES
       bash "$ROOT/keeper.sh"
 }
 
-echo "== 场景 1：跑满上限（120-25=95）→ 应 suspend → resume =="
+echo "== 场景 1：上限 120（安全点 95）→ 跑满 96 分钟应 suspend → resume =="
 reset running 96 "" 120
 rm -f "$ROOT/test/state.json"
 out1="$(run_keeper env)"; echo "$out1" | sed 's/^/      /'
@@ -66,7 +66,7 @@ out4="$(run_keeper env)"; echo "$out4" | sed 's/^/      /'
 [ "$(n_events)" = "0" ] && ok "冷却期内没有动作" || bad "冷却期内仍然动了"
 echo "$out4" | grep -q "冷却中" && ok "日志说明在冷却" || bad "日志未说明冷却"
 
-echo "== 场景 5：RUN_MINUTES=470 超过平台安全点 → 必须被忽略 =="
+echo "== 场景 5：上限 120 时 RUN_MINUTES=470 超过安全点 → 必须被忽略 =="
 reset running 96 "" 120
 out5="$(run_keeper RUN_MINUTES=470)"; echo "$out5" | sed 's/^/      /'
 echo "$out5" | grep -q "超过平台安全点" && ok "给出了告警" || bad "没有告警"
@@ -76,6 +76,30 @@ echo "== 场景 6：RUN_MINUTES 比安全点更早 → 采用更早的 =="
 reset running 60 "" 120
 out6="$(run_keeper RUN_MINUTES=50)"; echo "$out6" | sed 's/^/      /'
 [ "$(first_action)" = "suspend" ] && ok "50 分钟就轮转" || bad "没有按 50 分钟轮转"
+
+
+echo "== 场景 7：上限 480（安全点 455）→ 跑了 300 分钟不应轮转 =="
+reset running 300 "" 480
+out7="$(run_keeper env)"; echo "$out7" | sed 's/^/      /'
+[ "$(n_events)" = "0" ] && ok "未到 455 分钟不轮转" || bad "不该转却转了（$(n_events) 个动作）"
+echo "$out7" | grep -q "安全点 455" && ok "阈值按 480 算出 455" || bad "阈值算错"
+[ "$(n_leases)" -ge 1 ] && ok "仍然续租" || bad "没续租"
+
+echo "== 场景 8：上限 480 → 跑了 460 分钟应轮转 =="
+reset running 460 "" 480
+out8="$(run_keeper env)"; echo "$out8" | sed 's/^/      /'
+[ "$(first_action)" = "suspend" ] && ok "超过 455 分钟后轮转" || bad "没有轮转"
+
+echo "== 场景 9：上限 120 时跑 460 分钟 → 同样轮转（说明上限变动都能适配）=="
+reset running 460 "" 120
+out9="$(run_keeper env)"; echo "$out9" | sed 's/^/      /'
+[ "$(first_action)" = "suspend" ] && ok "按 120 的安全点 95 轮转" || bad "没有轮转"
+
+echo "== 场景 10：RUN_MINUTES=470 在上限 480 时 → 470 比 455 晚，必须被忽略 =="
+reset running 460 "" 480
+out10="$(run_keeper RUN_MINUTES=470)"; echo "$out10" | sed 's/^/      /'
+echo "$out10" | grep -q "超过平台安全点" && ok "给出了告警" || bad "没有告警"
+[ "$(first_action)" = "suspend" ] && ok "仍按 455 轮转，没有跑到 470" || bad "被 470 带跑了"
 
 echo
 echo "结果：PASS=$PASS FAIL=$FAIL"

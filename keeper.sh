@@ -8,7 +8,8 @@
 #      「闲置 30 分钟」把机器挂起。以前没有这一步，所以机器每闲半小时就真挂一次，
 #      全靠下一次 Actions 来捞（实测平均停机 8.8 分钟）。
 #   1. 该轮转就轮转 —— 连续运行快到平台上限时，主动 suspend → resume 把计时清零。
-#      上限从 API 的 maxRunMinutes 现取（免费号实测 120 分钟），不再写死 470。
+#      上限从 API 的 maxRunMinutes 现取，绝不写死：免费额度并不统一，
+#      2026-11 实测到 120 和 480 两种，同一账号也可能随时间调整。
 #   2. 兜底拉起 —— 机器真的已经停了（冷却已过），start 拉回来。
 #
 # 状态记在 state.json（workflow 自动提交回仓库），因为 runner 每次都是全新环境。
@@ -199,15 +200,19 @@ age_min="$("$PY" -c "print(int(($now-$anchor)/60))")"
 echo "已连续运行 ${age_min} 分钟（锚点 $anchor）"
 
 # 轮转阈值：一律以 API 的 maxRunMinutes 为准；RUN_MINUTES 只能让它更早，不能更晚。
-# （老 workflow 里写着 RUN_MINUTES=470，而平台实际上限是 120 —— 这里夹住，避免它把机器跑到被平台强制挂起。）
+# 免费号的 maxRunMinutes 并不统一：实测同一账号下可能随时间调整，不同账号也不同
+# （2026-11 观测到 120 和 480 两种）。所以这里绝不写死，一律现取。
+# 老 workflow 里写着的 RUN_MINUTES=470 会被夹在安全点之内，不会把机器跑到被平台强制挂起。
 platform_threshold=""
 if [ -n "$max_run" ] && [ "$max_run" -gt 0 ] 2>/dev/null; then
   platform_threshold="$((max_run - ROTATE_MARGIN_MIN))"
   [ "$platform_threshold" -gt 5 ] || platform_threshold=5
   echo "平台上限 ${max_run} 分钟，留 ${ROTATE_MARGIN_MIN} 分钟余量 → 安全点 ${platform_threshold} 分钟"
 else
-  platform_threshold=95
-  echo "没拿到 maxRunMinutes，退回默认安全点 ${platform_threshold} 分钟"
+  # 拿不到上限时按当前已知的最大免费额度（480）保守处理，宁可早转也不撞硬限制
+  platform_threshold=$((480 - ROTATE_MARGIN_MIN))
+  [ "$platform_threshold" -gt 5 ] || platform_threshold=455
+  echo "::warning::没拿到 maxRunMinutes，按免费额度 480 分钟估算，安全点 ${platform_threshold} 分钟"
 fi
 
 threshold="$platform_threshold"
