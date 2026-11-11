@@ -37,7 +37,8 @@ jobs:
           # 真实连续运行上限（8 小时）。API 的 maxRunMinutes 会阶梯式报小值
           # （实测 120 → 150 → 480），直接用会在 95 分钟就轮转，浪费额度。
           MAX_RUN_MINUTES: '480'
-          ROTATE_MARGIN_MIN: '25'
+          # 留 20 分钟余量 -> 460 分钟轮转
+          ROTATE_MARGIN_MIN: '20'
           LEASE_TTL: '1800'
         run: bash keeper.sh
 
