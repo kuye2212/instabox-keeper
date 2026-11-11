@@ -7,9 +7,10 @@
 #   0. 续 activity lease —— 这步才是「保活」：只要租约还有效，平台就不会因为
 #      「闲置 30 分钟」把机器挂起。以前没有这一步，所以机器每闲半小时就真挂一次，
 #      全靠下一次 Actions 来捞（实测平均停机 8.8 分钟）。
-#   1. 该轮转就轮转 —— 连续运行快到平台上限时，主动 suspend → resume 把计时清零。
-#      上限从 API 的 maxRunMinutes 现取，绝不写死：免费额度并不统一，
-#      2026-11 实测到 120 和 480 两种，同一账号也可能随时间调整。
+#   1. 该轮转就轮转 —— 连续运行快到真实上限时，主动 suspend → resume 把计时清零。
+#      真实上限是 8 小时（480 分钟），用 MAX_RUN_MINUTES 显式指定。
+#      不能直接用 API 的 maxRunMinutes：它会阶梯式报小值（实测 120 → 150 → 480），
+#      拿它算阈值会导致 95 分钟就轮转，把 8 小时的额度浪费掉。
 #   2. 兜底拉起 —— 机器真的已经停了（冷却已过），start 拉回来。
 #
 # 状态记在 state.json（workflow 自动提交回仓库），因为 runner 每次都是全新环境。
@@ -22,6 +23,9 @@ API_BASE="${API_BASE:-https://api.instabox.sh}"
 # 相对平台上限留多少余量再轮转（分钟）。平台的 cron 和我们的 cron 都不精确，
 # 留够余量才能保证「我们转」而不是「平台掐」。
 ROTATE_MARGIN_MIN="${ROTATE_MARGIN_MIN:-25}"
+# 真实连续运行上限（分钟）。API 的 maxRunMinutes 会阶梯报小值（120→150→480），
+# 不是天花板，所以这里显式指定。设为 0 才退回用 API 的值。
+MAX_RUN_MINUTES="${MAX_RUN_MINUTES:-480}"
 # 轮转后停多久（秒）。suspend 是暂停，进程还在；停 10 秒足够让平台记录一次新生命周期。
 ROTATE_HOLD_SEC="${ROTATE_HOLD_SEC:-10}"
 # 租约秒数：要明显大于调度间隔（10 分钟），才能扛住 GitHub cron 的延迟。
@@ -199,20 +203,33 @@ fi
 age_min="$("$PY" -c "print(int(($now-$anchor)/60))")"
 echo "已连续运行 ${age_min} 分钟（锚点 $anchor）"
 
-# 轮转阈值：一律以 API 的 maxRunMinutes 为准；RUN_MINUTES 只能让它更早，不能更晚。
-# 免费号的 maxRunMinutes 并不统一：实测同一账号下可能随时间调整，不同账号也不同
-# （2026-11 观测到 120 和 480 两种）。所以这里绝不写死，一律现取。
-# 老 workflow 里写着的 RUN_MINUTES=470 会被夹在安全点之内，不会把机器跑到被平台强制挂起。
+# 轮转阈值。
+#
+# 关键：API 的 maxRunMinutes 会「阶梯式」报小值 —— 实测同一台机器依次报
+# 120 → 150 → 480，那只是平台逐渐抬高的当前阶段值，不是真实天花板。
+# 直接拿它算阈值会在 95 分钟就轮转，而真实上限其实有 8 小时。
+#
+# 所以真实上限用 MAX_RUN_MINUTES 显式指定（默认 480 = 8 小时）。
+# 设为 0 才退回用 API 的阶梯值。RUN_MINUTES 仍只能让轮转更早，不能更晚。
+REAL_MAX_RUN="${MAX_RUN_MINUTES:-480}"
+
 platform_threshold=""
-if [ -n "$max_run" ] && [ "$max_run" -gt 0 ] 2>/dev/null; then
+if [ "$REAL_MAX_RUN" -gt 0 ] 2>/dev/null; then
+  platform_threshold="$((REAL_MAX_RUN - ROTATE_MARGIN_MIN))"
+  [ "$platform_threshold" -gt 5 ] || platform_threshold=5
+  if [ -n "$max_run" ] && [ "$max_run" != "$REAL_MAX_RUN" ] 2>/dev/null; then
+    echo "真实上限 ${REAL_MAX_RUN} 分钟（API 当前只报 ${max_run}，属阶梯值，忽略），留 ${ROTATE_MARGIN_MIN} 分钟余量 → 安全点 ${platform_threshold} 分钟"
+  else
+    echo "真实上限 ${REAL_MAX_RUN} 分钟，留 ${ROTATE_MARGIN_MIN} 分钟余量 → 安全点 ${platform_threshold} 分钟"
+  fi
+elif [ -n "$max_run" ] && [ "$max_run" -gt 0 ] 2>/dev/null; then
   platform_threshold="$((max_run - ROTATE_MARGIN_MIN))"
   [ "$platform_threshold" -gt 5 ] || platform_threshold=5
-  echo "平台上限 ${max_run} 分钟，留 ${ROTATE_MARGIN_MIN} 分钟余量 → 安全点 ${platform_threshold} 分钟"
+  echo "::warning::MAX_RUN_MINUTES=0，改用 API 的 ${max_run} 分钟（可能是阶梯值）→ 安全点 ${platform_threshold} 分钟"
 else
-  # 拿不到上限时按当前已知的最大免费额度（480）保守处理，宁可早转也不撞硬限制
   platform_threshold=$((480 - ROTATE_MARGIN_MIN))
   [ "$platform_threshold" -gt 5 ] || platform_threshold=455
-  echo "::warning::没拿到 maxRunMinutes，按免费额度 480 分钟估算，安全点 ${platform_threshold} 分钟"
+  echo "::warning::没拿到任何上限，按 480 分钟估算，安全点 ${platform_threshold} 分钟"
 fi
 
 threshold="$platform_threshold"
