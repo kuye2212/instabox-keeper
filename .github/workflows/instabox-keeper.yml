@@ -34,11 +34,11 @@ jobs:
         env:
           INSTABOX_API_KEY: ${{ secrets.INSTABOX_API_KEY }}
           MACHINE_ID: ${{ vars.INSTABOX_MACHINE_ID || 'm_agqz4ap54cjvki6u35bkkdauka' }}
-          # 真实连续运行上限（8 小时）。API 的 maxRunMinutes 会阶梯式报小值
-          # （实测 120 → 150 → 480），直接用会在 95 分钟就轮转，浪费额度。
-          MAX_RUN_MINUTES: '480'
-          # 留 20 分钟余量 -> 460 分钟轮转
-          ROTATE_MARGIN_MIN: '20'
+          # 真实连续运行上限 120 分钟。API 的 maxRunMinutes 是阶梯值
+          # （实测 120 -> 150 -> 480），但执行上限仍是 120，按 480 算会直接撞线。
+          MAX_RUN_MINUTES: '120'
+          # 留 15 分钟余量 -> 105 分钟轮转
+          ROTATE_MARGIN_MIN: '15'
           LEASE_TTL: '1800'
         run: bash keeper.sh
 

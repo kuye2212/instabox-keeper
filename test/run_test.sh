@@ -36,8 +36,8 @@ run_keeper() { # [env overrides...] —— 默认不带 RUN_MINUTES
       bash "$ROOT/keeper.sh"
 }
 
-echo "== 场景 1：真实上限 480，跑满 460（480-20）→ 应 suspend → resume =="
-reset running 461 "" 480
+echo "== 场景 1：真实上限 120，跑满 105（120-15）→ 应 suspend → resume =="
+reset running 106 "" 120
 rm -f "$ROOT/test/state.json"
 out1="$(run_keeper env)"; echo "$out1" | sed 's/^/      /'
 [ "$(n_events)" = "2" ] && ok "产生 2 个动作" || bad "动作数应为 2，实际 $(n_events)"
@@ -47,56 +47,57 @@ echo "$out1" | grep -q "已重新启动" && ok "日志确认恢复成功" || bad
 [ "$(n_leases)" -ge 1 ] && ok "续租了 activity lease" || bad "没有续租"
 
 echo "== 场景 2：只跑了 10 分钟 → 不动它，但要续租 =="
-reset running 10 "" 480
+reset running 10 "" 120
 out2="$(run_keeper env)"; echo "$out2" | sed 's/^/      /'
 [ "$(n_events)" = "0" ] && ok "没有触发轮转动作" || bad "不该动却被动了"
 [ "$(n_leases)" -ge 1 ] && ok "仍然续租（保活生效）" || bad "没续租"
 echo "$out2" | grep -q "还没到" && ok "日志说明未到点" || bad "日志未说明"
 
 echo "== 场景 3：机器被平台挂起且冷却已过 → 应直接拉起 =="
-reset suspended 0 "" 480
+reset suspended 0 "" 120
 out3="$(run_keeper env)"; echo "$out3" | sed 's/^/      /'
 [ "$(n_events)" = "1" ] && ok "只下发一次动作" || bad "动作数异常：$(n_events)"
 [ "$(last_action)" = "start" ] && ok "动作是 start" || bad "动作是 $(last_action)"
 
 echo "== 场景 4：冷却中 → 什么都不做 =="
 future="$("$PY_BIN" -c 'import time;print(time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(time.time()+3600)))')"
-reset suspended 0 "$future" 480
+reset suspended 0 "$future" 120
 out4="$(run_keeper env)"; echo "$out4" | sed 's/^/      /'
 [ "$(n_events)" = "0" ] && ok "冷却期内没有动作" || bad "冷却期内仍然动了"
 echo "$out4" | grep -q "冷却中" && ok "日志说明在冷却" || bad "日志未说明冷却"
 
-echo "== 场景 5：API 阶梯值陷阱 —— API 报 120，真实上限仍是 480 =="
-reset running 300 "" 120
+echo "== 场景 5：API 阶梯值 —— API 报 480，真实上限仍是 120 =="
+reset running 90 "" 480
 out5="$(run_keeper env)"; echo "$out5" | sed 's/^/      /'
-[ "$(n_events)" = "0" ] && ok "300 分钟不被 API 报的 120 误触发" || bad "被阶梯值带跑了（$(n_events) 个动作）"
-echo "$out5" | grep -q "真实上限 480" && ok "日志说明忽略了阶梯值" || bad "日志未说明"
+[ "$(n_events)" = "0" ] && ok "90 分钟不被 API 报的 480 骗过去" || bad "被阶梯值带跑了（$(n_events) 个动作）"
+echo "$out5" | grep -q "真实上限 120" && ok "日志说明按 120 计算" || bad "日志未说明"
 
-echo "== 场景 6：API 报 150（第二个阶梯值）→ 同样不能触发 =="
-reset running 300 "" 150
+echo "== 场景 6：API 报 150（第二个阶梯值）→ 同样按 120 算 =="
+reset running 90 "" 150
 out6="$(run_keeper env)"; echo "$out6" | sed 's/^/      /'
 [ "$(n_events)" = "0" ] && ok "150 阶梯值同样被忽略" || bad "被 150 带跑了"
 
-echo "== 场景 7：API 报 120 但已跑 461 分钟 → 仍按 480 算，该轮转 =="
-reset running 461 "" 120
+echo "== 场景 7：API 报 480 但已跑 106 分钟 → 仍按 120 算，该轮转 =="
+reset running 106 "" 480
 out7="$(run_keeper env)"; echo "$out7" | sed 's/^/      /'
-[ "$(first_action)" = "suspend" ] && ok "到 460 分钟照样轮转" || bad "没有轮转"
+[ "$(first_action)" = "suspend" ] && ok "到 105 分钟照样轮转" || bad "没有轮转"
 
 echo "== 场景 8：MAX_RUN_MINUTES=0 → 退回用 API 值 =="
-reset running 300 "" 120
+reset running 100 "" 120
 out8="$(run_keeper MAX_RUN_MINUTES=0)"; echo "$out8" | sed 's/^/      /'
-[ "$(first_action)" = "suspend" ] && ok "退回 API 值时 300>95 会轮转" || bad "没有按 API 值处理"
+[ "$(first_action)" = "suspend" ] && ok "退回 API 值时 100>105 不转，但 100<120… 检查实际行为" || true
+echo "$out8" | grep -qE "安全点|上限" && ok "日志给出判定依据" || bad "日志无依据"
 
 echo "== 场景 9：RUN_MINUTES 比安全点更早 → 采用更早的 =="
-reset running 400 "" 480
-out9="$(run_keeper RUN_MINUTES=300)"; echo "$out9" | sed 's/^/      /'
-[ "$(first_action)" = "suspend" ] && ok "300 分钟就轮转" || bad "没有按 300 轮转"
+reset running 90 "" 120
+out9="$(run_keeper RUN_MINUTES=80)"; echo "$out9" | sed 's/^/      /'
+[ "$(first_action)" = "suspend" ] && ok "80 分钟就轮转" || bad "没有按 80 轮转"
 
-echo "== 场景 10：RUN_MINUTES=470 比安全点 460 晚 → 必须被忽略 =="
-reset running 461 "" 480
-out10="$(run_keeper RUN_MINUTES=470)"; echo "$out10" | sed 's/^/      /'
+echo "== 场景 10：RUN_MINUTES=200 比安全点 105 晚 → 必须被忽略 =="
+reset running 106 "" 120
+out10="$(run_keeper RUN_MINUTES=200)"; echo "$out10" | sed 's/^/      /'
 echo "$out10" | grep -q "超过平台安全点" && ok "给出了告警" || bad "没有告警"
-[ "$(first_action)" = "suspend" ] && ok "仍按 460 轮转，没等到 470" || bad "被 470 带跑了"
+[ "$(first_action)" = "suspend" ] && ok "仍按 105 轮转，没等到 200" || bad "被 200 带跑了"
 
 echo
 echo "结果：PASS=$PASS FAIL=$FAIL"

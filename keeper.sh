@@ -7,10 +7,10 @@
 #   0. 续 activity lease —— 这步才是「保活」：只要租约还有效，平台就不会因为
 #      「闲置 30 分钟」把机器挂起。以前没有这一步，所以机器每闲半小时就真挂一次，
 #      全靠下一次 Actions 来捞（实测平均停机 8.8 分钟）。
-#   1. 该轮转就轮转 —— 连续运行快到真实上限时，主动 suspend → resume 把计时清零。
-#      真实上限是 8 小时（480 分钟），用 MAX_RUN_MINUTES 显式指定。
-#      不能直接用 API 的 maxRunMinutes：它会阶梯式报小值（实测 120 → 150 → 480），
-#      拿它算阈值会导致 95 分钟就轮转，把 8 小时的额度浪费掉。
+#   1. 该轮转就轮转 —— 连续运行快到上限时，主动 suspend → resume 把计时清零。
+#      免费机真实上限是 120 分钟（社区多个项目实测确认），用 MAX_RUN_MINUTES 显式指定。
+#      不能直接用 API 的 maxRunMinutes：它是「阶梯值」，会依次报 120 → 150 → 480，
+#      但那只是上报值的爬升，到 120 分钟照样强制挂起。按 480 算会直接撞线进冷却。
 #   2. 兜底拉起 —— 机器真的已经停了（冷却已过），start 拉回来。
 #
 # 状态记在 state.json（workflow 自动提交回仓库），因为 runner 每次都是全新环境。
@@ -22,10 +22,10 @@ API_BASE="${API_BASE:-https://api.instabox.sh}"
 
 # 相对平台上限留多少余量再轮转（分钟）。平台的 cron 和我们的 cron 都不精确，
 # 留够余量才能保证「我们转」而不是「平台掐」。
-ROTATE_MARGIN_MIN="${ROTATE_MARGIN_MIN:-20}"
-# 真实连续运行上限（分钟）。API 的 maxRunMinutes 会阶梯报小值（120→150→480），
-# 不是天花板，所以这里显式指定。设为 0 才退回用 API 的值。
-MAX_RUN_MINUTES="${MAX_RUN_MINUTES:-480}"
+ROTATE_MARGIN_MIN="${ROTATE_MARGIN_MIN:-15}"
+# 真实连续运行上限（分钟）。API 的 maxRunMinutes 是阶梯值（120→150→480），
+# 但执行上限仍是 120，所以这里显式指定。设为 0 才退回用 API 的值。
+MAX_RUN_MINUTES="${MAX_RUN_MINUTES:-120}"
 # 轮转后停多久（秒）。suspend 是暂停，进程还在；停 10 秒足够让平台记录一次新生命周期。
 ROTATE_HOLD_SEC="${ROTATE_HOLD_SEC:-10}"
 # 租约秒数：要明显大于调度间隔（10 分钟），才能扛住 GitHub cron 的延迟。
@@ -205,13 +205,13 @@ echo "已连续运行 ${age_min} 分钟（锚点 $anchor）"
 
 # 轮转阈值。
 #
-# 关键：API 的 maxRunMinutes 会「阶梯式」报小值 —— 实测同一台机器依次报
-# 120 → 150 → 480，那只是平台逐渐抬高的当前阶段值，不是真实天花板。
-# 直接拿它算阈值会在 95 分钟就轮转，而真实上限其实有 8 小时。
+# 关键：API 的 maxRunMinutes 是「阶梯值」—— 实测同一台机器依次报 120 → 150 → 480，
+# 但那只是上报值在爬升，真实执行上限仍是 120 分钟（社区 AIR-pixel、Matsumiko 等
+# 项目均实测确认，且 permission_denied 无法修改）。
 #
-# 所以真实上限用 MAX_RUN_MINUTES 显式指定（默认 480 = 8 小时）。
-# 设为 0 才退回用 API 的阶梯值。RUN_MINUTES 仍只能让轮转更早，不能更晚。
-REAL_MAX_RUN="${MAX_RUN_MINUTES:-480}"
+# 所以真实上限用 MAX_RUN_MINUTES 显式指定（默认 120）。设为 0 才退回用 API 的值。
+# RUN_MINUTES 仍只能让轮转更早，不能更晚。
+REAL_MAX_RUN="${MAX_RUN_MINUTES:-120}"
 
 platform_threshold=""
 if [ "$REAL_MAX_RUN" -gt 0 ] 2>/dev/null; then
@@ -227,9 +227,9 @@ elif [ -n "$max_run" ] && [ "$max_run" -gt 0 ] 2>/dev/null; then
   [ "$platform_threshold" -gt 5 ] || platform_threshold=5
   echo "::warning::MAX_RUN_MINUTES=0，改用 API 的 ${max_run} 分钟（可能是阶梯值）→ 安全点 ${platform_threshold} 分钟"
 else
-  platform_threshold=$((480 - ROTATE_MARGIN_MIN))
-  [ "$platform_threshold" -gt 5 ] || platform_threshold=455
-  echo "::warning::没拿到任何上限，按 480 分钟估算，安全点 ${platform_threshold} 分钟"
+  platform_threshold=$((120 - ROTATE_MARGIN_MIN))
+  [ "$platform_threshold" -gt 5 ] || platform_threshold=105
+  echo "::warning::没拿到任何上限，按 120 分钟估算，安全点 ${platform_threshold} 分钟"
 fi
 
 threshold="$platform_threshold"
