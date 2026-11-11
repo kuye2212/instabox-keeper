@@ -1,11 +1,14 @@
 name: instabox-keeper
 
-# 免费 InstaBox 机器的「跑 7h50m → 停 10m → 继续」循环。
-# GitHub 的服务器每 10 分钟来看一眼，不需要你的电脑开机，也不需要任何公网入口
-# （runner 只出站访问 api.instabox.sh）。
+# InstaBox 机器的「保活 + 定时轮转」。
 #
-# 注意：GitHub 的 cron 在高峰期可能延迟几分钟到十几分钟，最小粒度 5 分钟；
-# 公开仓库的 Actions 分钟数不限，私有仓库会按分钟计费（见 README）。
+# 保活：每次跑都续一个 activity lease（默认 1800 秒），平台就不会因为
+#       「闲置 30 分钟」把机器挂起。
+# 轮转：连续运行接近平台上限时（上限从 API 现取，免费号实测 120 分钟），
+#       主动 suspend→resume 把计时清零，避开平台的强制挂起和 60~135 分钟冷却。
+#
+# 注意 GitHub 的 cron 不准（高峰延迟几分钟到十几分钟），lease 的 1800 秒
+# 就是留给这个抖动的。cron-job.org 的 dispatch 是同一支 workflow，两条互不冲突。
 
 on:
   schedule:
@@ -22,7 +25,7 @@ concurrency:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-    # 停完要等 10 分钟再起，加上停止落地的轮询，留足余量
+    # 轮转要等暂停落地 + 保持 10 秒 + 恢复，留 20 分钟足够
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -30,9 +33,12 @@ jobs:
       - name: Run keeper
         env:
           INSTABOX_API_KEY: ${{ secrets.INSTABOX_API_KEY }}
-          MACHINE_ID: ${{ vars.INSTABOX_MACHINE_ID || 'm_agqztauvsenacuisvfppbogdle' }}
-          RUN_MINUTES: '470'   # 7 小时 50 分钟
-          REST_MINUTES: '10'
+          MACHINE_ID: ${{ vars.INSTABOX_MACHINE_ID || 'm_agqz4ap54cjvki6u35bkkdauka' }}
+          # 真实连续运行上限（8 小时）。API 的 maxRunMinutes 会阶梯式报小值
+          # （实测 120 → 150 → 480），直接用会在 95 分钟就轮转，浪费额度。
+          MAX_RUN_MINUTES: '480'
+          ROTATE_MARGIN_MIN: '25'
+          LEASE_TTL: '1800'
         run: bash keeper.sh
 
       - name: Persist state

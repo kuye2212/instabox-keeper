@@ -22,7 +22,7 @@ API_BASE="${API_BASE:-https://api.instabox.sh}"
 
 # 相对平台上限留多少余量再轮转（分钟）。平台的 cron 和我们的 cron 都不精确，
 # 留够余量才能保证「我们转」而不是「平台掐」。
-ROTATE_MARGIN_MIN="${ROTATE_MARGIN_MIN:-25}"
+ROTATE_MARGIN_MIN="${ROTATE_MARGIN_MIN:-20}"
 # 真实连续运行上限（分钟）。API 的 maxRunMinutes 会阶梯报小值（120→150→480），
 # 不是天花板，所以这里显式指定。设为 0 才退回用 API 的值。
 MAX_RUN_MINUTES="${MAX_RUN_MINUTES:-480}"
